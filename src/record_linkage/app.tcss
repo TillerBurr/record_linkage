@@ -1,0 +1,73 @@
+.main-container {
+    border: heavy green;
+    margin: 1;
+    height: 2fr;
+    border-title-color: green;
+    border-title-background: white;
+    border-title-style: bold;
+    align: center middle;
+    width:100%;
+    height:100%;
+}
+
+.input {
+    width: 100%;
+    height: 100%;
+    align: center middle;
+
+}
+
+.error {
+    column-span:8;
+    content-align: center middle;
+    color: red;
+}
+
+.input-container {
+    height:100%;
+    layout:grid;
+    grid-size:2;
+    grid-rows:1fr;
+    grid-columns:2fr 6fr;
+    align: center middle;
+}
+
+ValueInput{
+    height: 1fr;
+}
+
+.align-right{
+    align: right middle;
+}
+
+Tooltip {
+    padding: 2 4;
+    background: $primary;
+    color: auto 90%;
+}
+
+
+#main {
+    height: 100%;
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr;
+    grid-rows:4fr 4fr;
+    background: $boost;
+}
+
+.submit-button {
+    background:$primary
+}
+
+.button-container {
+    align: center middle;
+}
+
+Label {
+    text-style: underline;
+   }
+
+RichLog {
+    width:100%;
+}
