@@ -27,7 +27,7 @@ class LinkedData:
         starting_list_path: str | Path,
         results_config: NormalizeConfig,
         starting_list_config: NormalizeConfig,
-        results_id_column: str,
+        id_column: str,
         save_dir: Path = Path("data/"),
         lower_limit_prob: float = 0.75,
     ) -> None:
@@ -36,7 +36,7 @@ class LinkedData:
         self.df_results_orig = pl.read_csv(
             results_file_path,
             infer_schema_length=10000,
-            dtypes={results_id_column: pl.Utf8},
+            dtypes={id_column: pl.Utf8},
         )
         self.results_amount_col = (
             results_config.agg_col if results_config.agg_col else "Amount"
@@ -44,9 +44,9 @@ class LinkedData:
         self.df_starting_in = pl.read_csv(
             starting_list_path,
             infer_schema_length=10000,
-            dtypes={results_id_column: pl.Utf8},
+            dtypes={id_column: pl.Utf8},
         )
-        self.results_id_column = results_id_column
+        self.id_column = id_column
         self.save_dir = save_dir
         self.lower_limit_prob = lower_limit_prob
         self.is_normalized = False
@@ -56,10 +56,10 @@ class LinkedData:
         self.results = Normalize(self.df_results_orig, self.results_config)
         self.aggregated_results_orig = (
             self.df_results_orig.select(
-                pl.col(self.results_id_column),
+                pl.col(self.id_column),
                 pl.col(self.results_amount_col),
             )
-            .groupby(self.results_id_column)
+            .groupby(self.id_column)
             .agg(pl.col(self.results_amount_col).sum())
         )
         self.mailing_list = Normalize(self.df_starting_in, self.starting_list_config)
@@ -73,7 +73,7 @@ class LinkedData:
             raise NotNormalizedError
         self.linker = Linker(
             starting_list_df=self.starting_df_for_linking,
-            id_column=self.results_id_column,
+            id_column=self.id_column,
             results_df=self.results_df_for_linking,
             lower_limit_probability=self.lower_limit_prob,
         )
@@ -91,10 +91,10 @@ class LinkedData:
 
     def append_ids(self) -> Self:
         results_df_row_num_and_id = self.results.df.select(
-            [self.results_config.row_num_col_name, self.results_id_column],
+            [self.results_config.row_num_col_name, self.id_column],
         )
         starting_df_row_num_and_id = self.mailing_list.df.select(
-            [self.starting_list_config.row_num_col_name, self.results_id_column],
+            [self.starting_list_config.row_num_col_name, self.id_column],
         )
 
         df = self.linker_predictions.join(
@@ -102,23 +102,23 @@ class LinkedData:
             left_on=f"{self.results_config.row_num_col_name}_r",
             right_on=self.results_config.row_num_col_name,
             how="left",
-        ).rename({self.results_id_column: f"{self.results_id_column}_results"})
+        ).rename({self.id_column: f"{self.id_column}_results"})
 
         df = df.join(
             starting_df_row_num_and_id,
             left_on=f"{self.starting_list_config.row_num_col_name}_l",
             right_on=self.starting_list_config.row_num_col_name,
             how="left",
-        ).rename({self.results_id_column: f"{self.results_id_column}_starting"})
+        ).rename({self.id_column: f"{self.id_column}_starting"})
 
         self.predictions = df
         return self
 
     def make_matches_unique(self) -> Self:
         """ """
-        starting_id_col_str = f"{self.results_id_column}_starting"
+        starting_id_col_str = f"{self.id_column}_starting"
         starting_id_col = pl.col(starting_id_col_str)
-        results_id_col_str = f"{self.results_id_column}_results"
+        results_id_col_str = f"{self.id_column}_results"
         results_id_col = pl.col(results_id_col_str)
         eq = self.predictions.filter(starting_id_col == results_id_col)
 
@@ -153,7 +153,7 @@ class LinkedData:
         self.append_ids()
 
         donations = self.results.df.select(
-            self.results_id_column,
+            self.id_column,
             self.results_amount_col,
         )
         donations_tmp = self.aggregated_results_orig.rename(
@@ -161,13 +161,13 @@ class LinkedData:
         )
 
         orig_starting_df_lower_id = self.mailing_list.original_df.with_columns(
-            pl.col(self.results_id_column).str.to_lowercase(),
+            pl.col(self.id_column).str.to_lowercase(),
         )
-        key_match = orig_starting_df_lower_id.join(donations, on=self.results_id_column)
-        matched_ids = key_match.get_column(self.results_id_column)
+        key_match = orig_starting_df_lower_id.join(donations, on=self.id_column)
+        matched_ids = key_match.get_column(self.id_column)
         self.predictions = self.predictions.filter(
-            pl.col(f"{self.results_id_column}_starting").is_in(matched_ids).is_not()
-            & pl.col(f"{self.results_id_column}_results").is_in(matched_ids).is_not(),
+            pl.col(f"{self.id_column}_starting").is_in(matched_ids).is_not()
+            & pl.col(f"{self.id_column}_results").is_in(matched_ids).is_not(),
         )
 
         self.make_matches_unique()
@@ -175,29 +175,29 @@ class LinkedData:
         pred_df = self.predictions.select(
             "match_probability",
             "match_weight",
-            f"{self.results_id_column}_starting",
-            f"{self.results_id_column}_results",
+            f"{self.id_column}_starting",
+            f"{self.id_column}_results",
         )
 
         non_key_match = orig_starting_df_lower_id.filter(
-            pl.col(self.results_id_column).is_in(matched_ids).is_not(),
+            pl.col(self.id_column).is_in(matched_ids).is_not(),
         )
         matched = non_key_match.join(
             pred_df,
-            left_on=self.results_id_column,
-            right_on=f"{self.results_id_column}_starting",
+            left_on=self.id_column,
+            right_on=f"{self.id_column}_starting",
             how="left",
         )
         matched = matched.join(
             donations,
-            left_on=f"{self.results_id_column}_results",
-            right_on=self.results_id_column,
+            left_on=f"{self.id_column}_results",
+            right_on=self.id_column,
             how="left",
         )
         key_match = key_match.with_columns(
             [
-                pl.col(self.results_id_column).alias(
-                    f"{self.results_id_column}_results",
+                pl.col(self.id_column).alias(
+                    f"{self.id_column}_results",
                 ),
                 pl.lit(1.0).alias("match_probability"),
                 pl.lit(100.0).alias("match_weight"),
@@ -206,7 +206,7 @@ class LinkedData:
         matched = key_match.vstack(matched)
         matched = matched.join(
             donations_tmp,
-            on=self.results_id_column,
+            on=self.id_column,
             how="left",
         )
 
@@ -219,21 +219,21 @@ class LinkedData:
             then_replace(
                 when_clause,
                 pl.col("temp_amt"),
-                pl.col(self.results_amount_col),
+                self.results_amount_col,
             ),
             then_replace(
                 when_clause,
-                pl.col(self.results_id_column),
-                pl.col(f"{self.results_id_column}_results"),
+                pl.col(self.id_column),
+                f"{self.id_column}_results",
             ),
-            then_replace(when_clause, pl.lit(1.0), pl.col("match_probability")),
-            then_replace(when_clause, pl.lit(100.0), pl.col("match_weight")),
+            then_replace(when_clause, pl.lit(1.0), "match_probability"),
+            then_replace(when_clause, pl.lit(100.0), "match_weight"),
         ).drop("temp_amt")
 
         self.matched = matched.sort(
-            by=[f"{self.results_id_column}_results", self.results_amount_col],
+            by=[f"{self.id_column}_results", self.results_amount_col],
             descending=[False, True],
-        ).unique(subset=self.results_id_column)
+        ).unique(subset=self.id_column)
         return self
 
 
@@ -272,7 +272,7 @@ if __name__ == "__main__":
         starting_list_path="data/starting.csv",
         results_config=results_config,
         starting_list_config=starting_config,
-        results_id_column="ID",
+        id_column="ID",
         lower_limit_prob=0.6,
     )
     data.match()
