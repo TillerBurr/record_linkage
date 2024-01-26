@@ -12,6 +12,8 @@ from scourgify import NormalizeAddress
 from scourgify.exceptions import UnParseableAddressError
 from tenacity import retry, stop_after_attempt
 
+from record_linkage.utils import then_replace
+
 FIRST_PERSON_FIELDS = ["title1", "first1", "middle1", "last1", "nickname1", "suffix1"]
 SECOND_PERSON_FIELDS = ["title2", "first2", "middle2", "last2", "nickname2", "suffix2"]
 PERSON_FIELDS = ["title", "first", "middle", "last", "nickname", "suffix"]
@@ -25,29 +27,60 @@ COMMON_FIELDS = PERSON_FIELDS + [
     "state",
     "postal_code",
 ]
+ID_COLUMN = "ID"
 
 # regular expressions to find po box and zip code
 zipexpr = re.compile(r"\d{5}(-?\d{4})?$")
 boxexpr = re.compile(r"^P\.?O\.? box (\d+)", flags=re.IGNORECASE)
 
 
+class AggColCastError(Exception):
+    """Raised when the aggregate column cannot be converted to a Float64."""
+
+
 class NormalizeConfig(BaseModel):
+    """Normalization Configuration
+    Attributes:
+        addr_col: The name of the Address column. Should be a full mailing address.
+            (US only, due to usaddress-scourgify requirement)
+        name_col: The name of the Name column. Should be a person's or a couple's
+            name. If a couple exists, it should be separated by a '&' or ' and '.
+        agg_col: The name of the column that will be aggregated. The column either
+            should be a number that can be aggregated by polars, or a string
+            representing a number, e.g. a dollar amount "$23.32".
+        id_column: The name of the column that will be used as a unique ID. The only
+            requirement on this column is that the values in it are unique.
+
+
+    """
+
     addr_col: str = "Full Address"
     name_col: str = "Name"
-    row_num_col_name: str = "unique_id"
     agg_col: str | None = None
     addl_cols_to_keep: str | list[str] | None = None
-    name: str = "Normalized"
-    id_column: str = "Account_Number"
+    id_column: str | None = "Account_Number"
 
 
 class Normalize:
     def __init__(self, df_in: pl.DataFrame, config: NormalizeConfig) -> None:
+        """Normalize object is a wrapper around a DataFrame that normalizes a DataFrame
+        containing names and addresses.
+
+        Args:
+            df_in: DataFrame with a name column and and address column, as specified in
+                the config.
+            config: Configuration for normalization.
+        """
         self.config = config
-        id_column = self.config.id_column
-        df_in = self.fill_null_ids(df_in, id_column)
+        self.id_column = (
+            self.config.id_column if self.config.id_column is not None else ID_COLUMN
+        )
+        df_in = self.add_id(df_in)
+        df_in = self.fill_null_ids(df_in, self.id_column)
         self.df = df_in
         self.original_df = copy(df_in)
+
+    def normalize(self) -> Self:
         if self.config.agg_col is not None:
             self.fix_agg_col()
             self.aggregate_df()
@@ -55,61 +88,99 @@ class Normalize:
         self.normalize_name()
         self.normalize_address()
         self._one_person_per_row()
-        self.add_id()
         self.lowercase_strings()
+        return self
 
     def fix_agg_col(self) -> None:
-        if self.df.select(self.config.agg_col).dtypes[0] == pl.Utf8:
-            self.df = self.df.with_columns(
-                pl.col(self.config.agg_col)
-                .str.strip()
-                .str.replace(
-                    "[$. ]",
-                    "",
+        """Transform the `agg_col` into a `pl.Float64` if it is a string"""
+
+        if (
+            self.df.select(self.config.agg_col).dtypes[0] == pl.Utf8
+            and self.config.agg_col
+        ):
+            try:
+                self.df = self.df.with_columns(
+                    pl.col(self.config.agg_col)
+                    .str.strip()
+                    .str.replace(
+                        "[$. ]",
+                        "",
+                    )
+                    .cast(pl.Float64)
+                    .alias(self.config.agg_col),
                 )
-                .cast(pl.Float64)
-                .alias(self.config.agg_col),
-            )
+            except pl.ComputeError:
+                raise AggColCastError(
+                    f"Unable to cast {self.config.agg_col} as a Float",
+                )
 
     @staticmethod
     def fill_null_ids(df: pl.DataFrame, column: str) -> pl.DataFrame:
+        """Fill a column with unique values if it contains null values.
+
+        Args:
+            df: DataFrame with `column` as a column.
+            column: Column name to fill with UUID values if null.
+
+        Returns: DataFrame with the `column` filled with unique values. The `column`
+            will now have the datatype `pl.Utf8`.
+
+        """
         if df.select(column).dtypes[0] != pl.Utf8:
             df = df.with_columns(pl.col(column).cast(pl.Utf8))
-        nulls = df.select(pl.col(column).is_null().sum()).to_series().sum()
+
+        nulls = df.get_column(column).is_null().sum()
+
         if nulls > 0:
-            _unique_ = [str(uuid4()) for _ in range(0, df.shape[0])]
+            null_expr = pl.col(column).is_null()
+            null_mask = df.select(null_expr).get_column(column)
+            # minimize calls to `uuid4`, only call when needed
+            _unique_ = [str(uuid4()) if x else None for x in null_mask]
             df = df.with_columns(_unique_=pl.Series(_unique_))
-            df = df.with_columns(
-                pl.when(pl.col(column).is_null())
-                .then(pl.col("_unique_"))
-                .otherwise(pl.col(column))
-                .alias(column),
-            )
+
+            when = pl.when(null_expr)
+            df = df.with_columns(then_replace(when, pl.col("_unique_"), column))
             df = df.drop("_unique_")
         return df
 
     def aggregate_df(self) -> Self:
+        """Aggregate multiple rows into one row by grouping by `id_column` and summing
+        the `agg_col`
+        """
         if self.config.agg_col is None:
             raise ValueError("`agg_col` Cannot be `None`.")
-        agg_df = self.df.groupby(self.config.id_column).agg(
+        agg_df = self.df.groupby(self.id_column).agg(
             pl.col(self.config.agg_col).sum(),
         )
         self.drop_dupes()
         df = self.df.drop(self.config.agg_col)
-        self.df = df.join(agg_df, on=self.config.id_column)
+        self.df = df.join(agg_df, on=self.id_column)
         return self
 
     def drop_dupes(self) -> Self:
-        self.df = self.df.unique(subset=self.config.id_column)
+        """Drop duplicate rows based on `id_column`."""
+
+        self.df = self.df.unique(subset=self.id_column)
         return self
 
-    def add_id(self) -> Self:
-        if self.config.row_num_col_name not in self.df.schema:
-            self.df = self.df.with_row_count(self.config.row_num_col_name)
-        return self
+    def add_id(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Add the `id_column` if it does not exist in the DataFrame. The new
+        `id_column` is a column full of nulls.
 
-    @retry(stop=stop_after_attempt(3))
+        Args:
+            df: DataFrame to add an id column, if it doesn't exist.
+
+        Returns: DataFrame with an id column.
+
+        """
+
+        if self.id_column not in df.schema:
+            df = df.with_columns(pl.lit(None).alias(self.id_column))
+        return df
+
     def normalize_name(self) -> Self:
+        """Normalize the `name_col` from the `config` object."""
+
         print("[green]Normalizing Name")
         df = self.df.with_columns(
             pl.col(self.config.name_col).apply(_normalize_name_str).alias("std_name"),
@@ -122,6 +193,11 @@ class Normalize:
 
     @retry(stop=stop_after_attempt(3))
     def normalize_address(self) -> Self:
+        """Normalize the `addr_col` from the `config` object. Retry up to 3 times. It
+        is possible for the normalization to fail, since `usaddress` uses probabilistic
+        models.
+        """
+
         print("[green]Normalizing Address")
         self.df = self.df.with_columns(
             pl.col(self.config.addr_col)
@@ -131,7 +207,12 @@ class Normalize:
         return self
 
     def extract_final_dataframe(self) -> pl.DataFrame:
-        addl = [self.config.row_num_col_name, self.config.id_column]
+        """Extract the final DataFrame as a subset of `self.df`.
+        Only returns fields that are necessary for the pipeline or are requested
+        explicitly.
+        """
+
+        addl = [self.id_column]
         match self.config.addl_cols_to_keep:
             case None:
                 pass
@@ -149,9 +230,19 @@ class Normalize:
         return self.df_out
 
     def export(self, path: str | Path) -> None:
+        """Export the DataFrame to a csv file.
+
+        Args:
+            path: Path to write the csv.
+        """
         self.df.write_csv(path)
 
     def _one_person_per_row(self) -> Self:
+        """Only allow one person per row.
+        In the case of two people in the name column, move the second person to a new
+        row.
+        """
+
         df = self.df
 
         first = df.select(pl.all().exclude(SECOND_PERSON_FIELDS)).rename(
@@ -169,14 +260,27 @@ class Normalize:
         return self
 
     def lowercase_strings(self) -> Self:
+        """Make all strings in the DataFrame lowercase.
+        This helps the record linkage algorithm to link records properly.
+        """
+
         self.df = self.df.with_columns(pl.col(pl.Utf8).str.to_lowercase())
         return self
 
 
 def replace_empty_strings(
     df: pl.DataFrame,
-    cols: pl.Utf8 | list[str] = pl.Utf8,
+    cols: pl.Utf8 | list[str] = pl.Utf8,  # type:ignore
 ) -> pl.DataFrame:
+    """Replace empty strings in given columns with `None`.
+
+    Args:
+        df: DataFrame containing `cols`
+        cols: Columns to replace empty strings.
+
+    Returns:
+
+    """
     df = df.with_columns(
         [
             pl.when(pl.col(cols).str.lengths() == 0)
@@ -189,6 +293,16 @@ def replace_empty_strings(
 
 
 def _normalize_name_str(name: str) -> dict[str, str]:
+    """Normalize a name string.
+    Split the name into multiple columns if separated by '&' or ' and '. Then
+    parse each of these names into their parts using `nameparser`.
+
+    Args:
+        name: A name string.
+
+    Returns: Dictionary of name parts for 1-2 people.
+
+    """
     row = {}
     name = name.replace(" and ", "&")
     name1, *name2 = name.split("&")
@@ -223,12 +337,25 @@ def _normalize_name_str(name: str) -> dict[str, str]:
 
 
 def _normalize_address_str(address: str) -> dict[str, str]:
+    """Normalize the address.
+    Using `usaddress-scourgify` to parse an address into its components. It tends to
+    fail if it is a post office box, in which case, it is handled manually using
+    regular expressions.
+
+    Args:
+        address:
+
+    Returns:
+
+    """
     try:
         result = NormalizeAddress(address).normalize()
     except UnParseableAddressError:
         if "PO BOX" in address.upper().replace(".", ""):
-            pobox = re.search(boxexpr, address)[0]
-            zipcode = re.search(zipexpr, address)[0]
+            pobox = re.search(boxexpr, address)
+            pobox = pobox[0] if pobox is not None else ""
+            zipcode = re.search(zipexpr, address)
+            zipcode = zipcode[0] if zipcode is not None else ""
 
             citystate = address.replace(pobox, "").replace(zipcode, "").strip()
             split_citystate = citystate.split(",")
@@ -248,5 +375,6 @@ def _normalize_address_str(address: str) -> dict[str, str]:
 
         else:
             raise
-    result["postal_code"] = result["postal_code"][0:5]
+    if result.get("postal_code", None) is not None:
+        result["postal_code"] = result["postal_code"][0:5]
     return result

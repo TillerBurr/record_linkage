@@ -204,6 +204,7 @@ class MainScreen(Screen):
 
         sleep(5)
         try:
+            # TODO: If empty, don't pass into kwargs
             starting_file_path = self.query_one("#starting-file-path", Input).value
             starting_name_col = self.query_one("#starting-name-col", Input).value
             starting_address_col = self.query_one("#starting-address-col", Input).value
@@ -234,7 +235,7 @@ class MainScreen(Screen):
                 lower_limit_prob=lower_limit,
             )
 
-            data.match()
+            data.match(settings={"unique_id_column_name": id_col})
             out_path = Path(output_dir)
             name = out_path
             if out_path.is_dir():

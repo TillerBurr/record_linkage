@@ -1,7 +1,7 @@
 from datetime import timedelta
 from pathlib import Path
 from time import time
-from typing import Self
+from typing import Any, Self
 
 import polars as pl
 from polars.type_aliases import UniqueKeepStrategy
@@ -54,64 +54,48 @@ class LinkedData:
 
     def normalize(self) -> Self:
         self.results = Normalize(self.df_results_orig, self.results_config)
+        self.results.normalize()
+        results_orig = self.results.drop_dupes().df
         self.aggregated_results_orig = (
-            self.df_results_orig.select(
+            results_orig.select(
                 pl.col(self.id_column),
                 pl.col(self.results_amount_col),
             )
             .groupby(self.id_column)
             .agg(pl.col(self.results_amount_col).sum())
         )
-        self.mailing_list = Normalize(self.df_starting_in, self.starting_list_config)
-        self.results_df_for_linking = self.results.extract_final_dataframe()
-        self.starting_df_for_linking = self.mailing_list.extract_final_dataframe()
+        self.starting_list = Normalize(self.df_starting_in, self.starting_list_config)
+        self.starting_list.normalize()
         self.is_normalized = True
+        self.starting_normalized = self.starting_list.extract_final_dataframe()
+        self.results_normalized = self.results.extract_final_dataframe()
         return self
 
-    def link(self) -> Self:
+    def link(self, settings: dict[str, Any] = {}) -> Self:
         if not self.is_normalized:
             raise NotNormalizedError
         self.linker = Linker(
-            starting_list_df=self.starting_df_for_linking,
-            id_column=self.id_column,
-            results_df=self.results_df_for_linking,
+            starting_list_df=self.starting_normalized,
+            results_df=self.results_normalized,
             lower_limit_probability=self.lower_limit_prob,
+            settings=settings,
         )
         print("Estimating Model")
         self.linker.estimate_model()
-        print("Predicting Model")
 
+        print("Predicting Model")
         self.linker.predict()
-        # self.linker.save_model(self.save_dir / "model.json")
-        self.linker_predictions = pl.from_pandas(
+        self.predictions = pl.from_pandas(
             self.linker.predictions.as_pandas_dataframe(),
         )
+        self.predictions.write_csv("data/test.csv")
+        self.predictions = self.predictions.rename(
+            {
+                f"{self.id_column}_l": f"{self.id_column}_starting",
+                f"{self.id_column}_r": f"{self.id_column}_results",
+            },
+        )
         self.is_linked = True
-        return self
-
-    def append_ids(self) -> Self:
-        results_df_row_num_and_id = self.results.df.select(
-            [self.results_config.row_num_col_name, self.id_column],
-        )
-        starting_df_row_num_and_id = self.mailing_list.df.select(
-            [self.starting_list_config.row_num_col_name, self.id_column],
-        )
-
-        df = self.linker_predictions.join(
-            results_df_row_num_and_id,
-            left_on=f"{self.results_config.row_num_col_name}_r",
-            right_on=self.results_config.row_num_col_name,
-            how="left",
-        ).rename({self.id_column: f"{self.id_column}_results"})
-
-        df = df.join(
-            starting_df_row_num_and_id,
-            left_on=f"{self.starting_list_config.row_num_col_name}_l",
-            right_on=self.starting_list_config.row_num_col_name,
-            how="left",
-        ).rename({self.id_column: f"{self.id_column}_starting"})
-
-        self.predictions = df
         return self
 
     def make_matches_unique(self) -> Self:
@@ -142,15 +126,17 @@ class LinkedData:
         self.predictions = eq
         return self
 
-    def match(self) -> Self:
+    def match(
+        self,
+        settings: dict[str, Any] = {},
+    ) -> Self:
         self.normalize()
-        self.link()
+        self.link(settings)
 
         if not self.is_normalized:
             raise NotNormalizedError
         if not self.is_linked:
             raise NotLinkedError
-        self.append_ids()
 
         donations = self.results.df.select(
             self.id_column,
@@ -160,7 +146,7 @@ class LinkedData:
             {self.results_amount_col: "temp_amt"},
         )
 
-        orig_starting_df_lower_id = self.mailing_list.original_df.with_columns(
+        orig_starting_df_lower_id = self.starting_list.original_df.with_columns(
             pl.col(self.id_column).str.to_lowercase(),
         )
         key_match = orig_starting_df_lower_id.join(donations, on=self.id_column)
@@ -178,7 +164,6 @@ class LinkedData:
             f"{self.id_column}_starting",
             f"{self.id_column}_results",
         )
-
         non_key_match = orig_starting_df_lower_id.filter(
             pl.col(self.id_column).is_in(matched_ids).is_not(),
         )
@@ -257,9 +242,9 @@ def uniquify(
 if __name__ == "__main__":
     start = time()
     results_config = NormalizeConfig(
-        agg_col="Gf_Amount",
+        agg_col="Amount",
         id_column="ID",
-        name_col="Gf_CnBio_Name",
+        name_col="Name",
         addr_col="Full Address",
     )
     starting_config = NormalizeConfig(
@@ -268,7 +253,7 @@ if __name__ == "__main__":
         name_col="Full Name",
     )
     data = LinkedData(
-        results_file_path="data/donations.csv",
+        results_file_path="data/results.csv",
         starting_list_path="data/starting.csv",
         results_config=results_config,
         starting_list_config=starting_config,
