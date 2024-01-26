@@ -58,7 +58,7 @@ class NormalizeConfig(BaseModel):
     name_col: str = "Name"
     agg_col: str | None = None
     addl_cols_to_keep: str | list[str] | None = None
-    id_column: str | None = "Account_Number"
+    id_column: str | None = None
 
 
 class Normalize:
@@ -80,7 +80,7 @@ class Normalize:
         self.df = df_in
         self.original_df = copy(df_in)
 
-    def normalize(self) -> Self:
+    def normalize(self) -> pl.DataFrame:
         if self.config.agg_col is not None:
             self.fix_agg_col()
             self.aggregate_df()
@@ -89,7 +89,7 @@ class Normalize:
         self.normalize_address()
         self._one_person_per_row()
         self.lowercase_strings()
-        return self
+        return self.extract_final_dataframe()
 
     def fix_agg_col(self) -> None:
         """Transform the `agg_col` into a `pl.Float64` if it is a string"""

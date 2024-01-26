@@ -50,6 +50,14 @@ class BaseLinkingSettings:
 
 
 def create_settings(settings: dict[str, Any] = {}) -> dict[str, Any]:
+    """Create a settings dict that contains the minimal settings.
+
+    Args:
+        settings: A dictionary of settings for `splink`.
+
+    Returns: Minimal settings dict to link.
+
+    """
     for setting in (
         "blocking_rules_to_generate_predictions",
         "comparisons",

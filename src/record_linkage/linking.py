@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Literal, Self, TypeAlias
 
 import polars as pl
 from duckdb import DuckDBPyConnection
@@ -7,6 +7,12 @@ from rich import print
 from splink.duckdb.linker import DuckDBLinker
 
 from record_linkage.linking_settings import BaseLinkingSettings, create_settings
+
+T_Estimation: TypeAlias = Literal["label"] | Literal["EM"]
+
+
+class ModelEstimationError(Exception):
+    ...
 
 
 class DBLinker(DuckDBLinker):
@@ -36,6 +42,19 @@ class DBLinker(DuckDBLinker):
 
 
 class Linker:
+    """The Linker. Takes two dataframes and creates a new dataframe with records linked
+    together. DataFrames must be normalized before use.
+
+    Attributes:
+        settings: Settings for the DuckDBLinker
+        linker: The DuckDBLinker
+        debug_mode: Debug mode for DuckDBLinker
+        m_estimation_type: `m` parameter estimation. By label or by
+        Expectation/Maximization
+        lower_limit_prob: The lowest probability level acceptible
+        predictions: The final predictions/links.
+    """
+
     def __init__(
         self,
         starting_list_df: pl.DataFrame,
@@ -56,10 +75,13 @@ class Linker:
         self.linker.debug_mode = debug_mode
         self.m_estimation_type = m_estimatation_type
         self.lower_limit_prob = lower_limit_probability
+        self.predictions = None
+        self._model_estimated = False
 
     def estimate_model(
         self,
     ) -> Self:
+        """Make model estimates. Needed before making predictions."""
         deterministic_rules = self.settings.get(
             "deterministic_rules",
             BaseLinkingSettings.deterministic_rules,
@@ -93,15 +115,33 @@ class Linker:
         elif self.m_estimation_type == "EM":
             for rule in blocking_rules:
                 self.linker.EM_estimation(rule)
+        self._model_estimated = True
         return self
 
     def predict(self) -> Self:
+        """Make predictions based on the estimates of parameters."""
+        if not self._model_estimated:
+            raise ModelEstimationError("Model has not yet been estimated")
         self.predictions = self.linker.predict(
             threshold_match_probability=self.lower_limit_prob,
         )
         return self
 
     def save_model(self, save_path: str | Path) -> None:
+        """Save the model for future use.
+
+        Args:
+            save_path: Where to save the model.
+        """
         if isinstance(save_path, Path):
             save_path = save_path.as_posix()
         self.linker.save_model_to_json(save_path, overwrite=True)
+
+    def load_model(self, load_path: Path) -> None:
+        """Load a model from the given path.
+
+        Args:
+            load_path: A previously saved model.
+        """
+        self.linker.load_model(load_path)
+        self._model_estimated = True

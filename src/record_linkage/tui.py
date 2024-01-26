@@ -231,7 +231,6 @@ class MainScreen(Screen):
                 starting_list_path=starting_file_path,
                 results_config=results_config,
                 starting_list_config=starting_config,
-                id_column=id_col,
                 lower_limit_prob=lower_limit,
             )
 
