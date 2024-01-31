@@ -1,7 +1,6 @@
 from datetime import datetime
 from pathlib import Path
-from time import sleep
-from typing import Iterable
+from typing import Iterable, TypeVar
 
 from rich import print
 from rich.traceback import Traceback
@@ -17,17 +16,40 @@ from textual.worker import get_current_worker
 
 from record_linkage.match import LinkedData
 from record_linkage.normalize import NormalizeConfig
+from record_linkage.utils import check_file_header, remove_none_kwargs
+
+T = TypeVar("T")
+
+
+class IsDirValidator(Validator):
+    def validate(self, value: str) -> ValidationResult:
+        if Path(value).is_dir():
+            return self.success()
+        return self.failure("Not a directory")
 
 
 class FileExistsValidator(Validator):
+    """Validate that a file exists and is not a directory."""
+
     def validate(self, value: str) -> ValidationResult:
+        """Validate the value and check if it's a valid file.
+
+        Args:
+            value:
+
+        Returns:
+
+        """
         value_path = Path(value)
-        if value_path.exists() and not value_path.is_dir():
-            return self.success()
-        elif value_path.exists() and value_path.is_dir():
+        if value_path.exists() and value_path.is_dir():
             return self.failure(f"File: '{value}' Is a Directory.")
-        else:
+        elif value_path.exists() and value_path.suffix != ".csv":
+            return self.failure(f"File: '{value}' Is Not A csv File.")
+        elif not value_path.exists():
             return self.failure(f"File: '{value}' Does Not Exist.")
+        elif value_path.exists():
+            return self.success()
+        return self.failure("Unknown Error")
 
 
 class ValueInput(Container):
@@ -123,6 +145,8 @@ class ResultsInput(Container):
 class CommonInput(Container):
     BORDER_TITLE = "Misc. Info"
 
+    # TODO Add a path to settings field
+    # TODO Add a way to edit Settings
     def compose(self) -> ComposeResult:
         with Vertical():
             yield ValueInput(
@@ -135,12 +159,13 @@ class CommonInput(Container):
                 input_id="lower-limit",
                 tooltip="The smallest value that"
                 + " the probability of record_linkage to accept.",
-                validators=Number(minimum=0, maximum=1),
+                validators=Number(minimum=0.01, maximum=1),
             )
             yield ValueInput(
                 label="Output Dir.",
                 input_id="output-dir",
                 tooltip="Where to write the final matched file.",
+                validators=IsDirValidator(),
             )
 
 
@@ -191,6 +216,8 @@ class MainScreen(Screen):
 
     @work(exclusive=True, thread=True)
     async def action_match(self):
+        """Perform the matching."""
+
         def ui_work():
             self.app.push_screen(WorkingScreen())
 
@@ -202,54 +229,75 @@ class MainScreen(Screen):
         log.begin_capture_print()
         print("[bold green]Matching In Progress...")
 
-        sleep(5)
         try:
-            # TODO: If empty, don't pass into kwargs
-            starting_file_path = self.query_one("#starting-file-path", Input).value
-            starting_name_col = self.query_one("#starting-name-col", Input).value
-            starting_address_col = self.query_one("#starting-address-col", Input).value
-            results_file_path = self.query_one("#results-file-path", Input).value
-            results_name_col = self.query_one("#results-name-col", Input).value
-            results_address_col = self.query_one("#results-address-col", Input).value
-            results_agg_col = self.query_one("#results-agg-col", Input).value
-            lower_limit = float(self.query_one("#lower-limit", Input).value)
-            id_col = self.query_one("#id-col", Input).value
-            output_dir = self.query_one("#output-dir", Input).value
-            results_config = NormalizeConfig(
-                agg_col=results_agg_col,
-                id_column=id_col,
-                name_col=results_name_col,
-                addr_col=results_address_col,
-            )
-            starting_config = NormalizeConfig(
-                id_column=id_col,
-                addr_col=starting_address_col,
-                name_col=starting_name_col,
-            )
-            data = LinkedData(
-                results_file_path=results_file_path,
-                starting_list_path=starting_file_path,
-                results_config=results_config,
-                starting_list_config=starting_config,
-                lower_limit_prob=lower_limit,
-            )
+            starting_file_path = self.query_or("#starting-file-path")
+            starting_name_col = self.query_or("#starting-name-col")
+            starting_address_col = self.query_or("#starting-address-col")
+            results_file_path = self.query_or("#results-file-path")
+            results_name_col = self.query_or("#results-name-col")
+            results_address_col = self.query_or("#results-address-col")
+            results_agg_col = self.query_or("#results-agg-col")
 
-            data.match(settings={"unique_id_column_name": id_col})
-            out_path = Path(output_dir)
-            name = out_path
-            if out_path.is_dir():
+            lower_limit = float(self.query_or("#lower-limit", 0.01))
+            id_col = self.query_or("#id-col", "unique_id")
+            output_dir = self.query_or("#output-dir", "data/")
+
+            if starting_file_path is None or results_file_path is None:
+                raise ValueError("Please specify all of the fields.")
+            else:
+                results_kwargs = remove_none_kwargs(
+                    agg_col=results_agg_col,
+                    id_column=id_col,
+                    name_col=results_name_col,
+                    addr_col=results_address_col,
+                )
+
+                starting_kwargs = remove_none_kwargs(
+                    id_column=id_col,
+                    addr_col=starting_address_col,
+                    name_col=starting_name_col,
+                )
+                results_config = NormalizeConfig(**results_kwargs)
+                starting_config = NormalizeConfig(**starting_kwargs)
+                check_file_header_fields(
+                    results_config,
+                    results_file_path,
+                    starting_config,
+                    starting_file_path,
+                )
+
+                linked_data_kwargs = remove_none_kwargs(
+                    results_file_path=results_file_path,
+                    starting_list_path=starting_file_path,
+                    results_config=results_config,
+                    starting_list_config=starting_config,
+                    lower_limit_prob=lower_limit,
+                )
+                data = LinkedData(**linked_data_kwargs)
+
+                data.match(settings={"unique_id_column_name": id_col})
+                # Convert output_dir to a directory
+                output_dir = output_dir.rstrip("/") + "/"
+                out_path = Path(output_dir)
+
                 if not out_path.exists():
                     out_path.mkdir(parents=True)
                 name = out_path / f"Matched - {datetime.now():%Y-%m-%d}.csv"
-
-            data.matched.write_csv(name)
-            print(f"\n\n[bold green]You can find the output at {name}")
+                data.matched.write_csv(name)
+                print(
+                    "\n\n[bold green]You can find the output at "
+                    + f"{name.resolve().as_posix()}'",
+                )
         except Exception:
             log.write(Traceback(width=None, show_locals=True))
 
         print("\n\n\n\n")
         print("[bold green]Press Enter to Return...[/]")
         log.end_capture_print()
+
+    def query_or(self, selector: str, default: str | T = None) -> str | T:
+        query_val = self.query_one(selector, Input).value
+        return query_val if query_val != "" else default
 
 
 class OutputLog(RichLog):
@@ -293,6 +341,49 @@ FIELDS = [
 # @on(Input.Changed, "#id2")
 # async def run_test(self, event: Input.Changed) -> None:
 #     self.query_one("#output", Output).text = self.query_one("#id2", Input).value
+
+
+def check_file_header_fields(
+    results_config: NormalizeConfig,
+    results_file_path: str,
+    starting_config: NormalizeConfig,
+    starting_file_path: str,
+) -> None:
+    results_header_check = check_file_header(
+        results_file_path,  # type:ignore
+        {
+            "name_col": results_config.name_col,
+            "addr_col": results_config.addr_col,
+            "id_col": results_config.id_column,
+        },
+    )
+    starting_header_check = check_file_header(
+        starting_file_path,  # type:ignore
+        {
+            "name_col": starting_config.name_col,
+            "addr_col": starting_config.addr_col,
+            "id_col": starting_config.id_column,
+        },
+    )
+
+    if (
+        not starting_header_check["id_col"]
+        and not results_header_check["id_col"]
+        and not starting_header_check["name_col"]
+        and not results_header_check["name_col"]
+        and not starting_header_check["addr_col"]
+        and not results_header_check["addr_col"]
+    ):
+        raise ValueError("ID, Name and Address cannot all be null")
+    if results_header_check["name_col"] and not starting_header_check["name_col"]:
+        raise ValueError("Name defined in `results`, but not found in `starting`")
+
+    if not results_header_check["name_col"] and starting_header_check["name_col"]:
+        raise ValueError("Name defined in `starting`, but not found in `results")
+    if results_header_check["addr_col"] and not starting_header_check["addr_col"]:
+        raise ValueError("Address defined in `results`, but not found in `starting`")
+    if not results_header_check["addr_col"] and starting_header_check["addr_col"]:
+        raise ValueError("Address defined in `starting`, but not found in `results")
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ class ModelEstimationError(Exception):
     ...
 
 
+# TODO: Add different linkers
 class DBLinker(DuckDBLinker):
     """Wrapper around splink's `DuckDBLinker`"""
 
@@ -77,6 +78,8 @@ class Linker:
         self.lower_limit_prob = lower_limit_probability
         self.predictions = None
         self._model_estimated = False
+
+        self.save_model("data/model.json")
 
     def estimate_model(
         self,

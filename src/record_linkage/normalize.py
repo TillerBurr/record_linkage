@@ -19,14 +19,15 @@ SECOND_PERSON_FIELDS = ["title2", "first2", "middle2", "last2", "nickname2", "su
 PERSON_FIELDS = ["title", "first", "middle", "last", "nickname", "suffix"]
 FIRST_RENAME_DICT = {y: x for x, y in zip(PERSON_FIELDS, FIRST_PERSON_FIELDS)}
 SECOND_RENAME_DICT = {y: x for x, y in zip(PERSON_FIELDS, SECOND_PERSON_FIELDS)}
-
-COMMON_FIELDS = PERSON_FIELDS + [
+ADDRESS_FIELDS = [
     "address_line_1",
     "address_line_2",
     "city",
     "state",
     "postal_code",
 ]
+
+COMMON_FIELDS = PERSON_FIELDS + ADDRESS_FIELDS
 ID_COLUMN = "ID"
 
 # regular expressions to find po box and zip code
@@ -54,8 +55,8 @@ class NormalizeConfig(BaseModel):
 
     """
 
-    addr_col: str = "Full Address"
-    name_col: str = "Name"
+    addr_col: str | None = None
+    name_col: str | None = None
     agg_col: str | None = None
     addl_cols_to_keep: str | list[str] | None = None
     id_column: str | None = None
@@ -182,12 +183,19 @@ class Normalize:
         """Normalize the `name_col` from the `config` object."""
 
         print("[green]Normalizing Name")
-        df = self.df.with_columns(
-            pl.col(self.config.name_col).apply(_normalize_name_str).alias("std_name"),
-        ).unnest("std_name")
-        self.df = replace_empty_strings(
-            df,
-        )
+        if self.config.name_col is not None:
+            df = self.df.with_columns(
+                pl.col(self.config.name_col)
+                .apply(_normalize_name_str)
+                .alias("std_name"),
+            ).unnest("std_name")
+            self.df = replace_empty_strings(
+                df,
+            )
+        else:
+            self.df = self.df.with_columns(
+                pl.lit(None).alias(field) for field in PERSON_FIELDS
+            )
 
         return self
 
@@ -199,11 +207,17 @@ class Normalize:
         """
 
         print("[green]Normalizing Address")
-        self.df = self.df.with_columns(
-            pl.col(self.config.addr_col)
-            .apply(_normalize_address_str)
-            .alias("std_addr"),
-        ).unnest("std_addr")
+        if self.config.addr_col is not None:
+            self.df = self.df.with_columns(
+                pl.col(self.config.addr_col)
+                .apply(_normalize_address_str)
+                .alias("std_addr"),
+            ).unnest("std_addr")
+
+        else:
+            self.df = self.df.with_columns(
+                pl.lit(None).alias(field) for field in ADDRESS_FIELDS
+            )
         return self
 
     def extract_final_dataframe(self) -> pl.DataFrame:
@@ -242,6 +256,8 @@ class Normalize:
         In the case of two people in the name column, move the second person to a new
         row.
         """
+        if self.config.name_col is None:
+            return self
 
         df = self.df
 
@@ -375,6 +391,6 @@ def _normalize_address_str(address: str) -> dict[str, str]:
 
         else:
             raise
-    if result.get("postal_code", None) is not None:
-        result["postal_code"] = result["postal_code"][0:5]
+    if result["postal_code"] is not None:
+        result["postal_code"] = result["postal_code"][0:5]  # type: ignore
     return result

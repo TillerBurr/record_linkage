@@ -1,3 +1,6 @@
+from pathlib import Path
+from typing import Mapping
+
 import polars as pl
 import polars.functions.whenthen as whenthen
 
@@ -31,3 +34,23 @@ def then_replace(
         when_clause.then(then_col).otherwise(pl.col(otherwise_col)).alias(otherwise_col)
     )
     return rv
+
+
+def remove_none_kwargs(**kwargs):
+    """Remove the keys with None values from kwargs."""
+    return {k: v for k, v in kwargs.items() if v is not None}
+
+
+def check_file_header(
+    file_path: Path | str,
+    contains: Mapping[str, str | None],
+) -> dict[str, bool]:
+    if isinstance(file_path, str):
+        file_path = Path(file_path)
+    found = {k: False for k in contains.keys()}
+    cols = pl.read_csv(file_path, infer_schema_length=10000).columns
+    print(cols)
+    for k, v in contains.items():
+        if v in cols and v is not None:
+            found[k] = True
+    return found
