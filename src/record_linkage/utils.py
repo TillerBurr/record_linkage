@@ -49,7 +49,6 @@ def check_file_header(
         file_path = Path(file_path)
     found = {k: False for k in contains.keys()}
     cols = pl.read_csv(file_path, infer_schema_length=10000).columns
-    print(cols)
     for k, v in contains.items():
         if v in cols and v is not None:
             found[k] = True

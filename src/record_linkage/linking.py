@@ -6,7 +6,7 @@ from duckdb import DuckDBPyConnection
 from rich import print
 from splink.duckdb.linker import DuckDBLinker
 
-from record_linkage.linking_settings import BaseLinkingSettings, create_settings
+from record_linkage.linking_settings import DEFAULT_LINKING_CONFIG, create_settings
 
 T_Estimation: TypeAlias = Literal["label"] | Literal["EM"]
 
@@ -64,6 +64,7 @@ class Linker:
         m_estimatation_type: str = "label",
         lower_limit_probability: float = 0.75,
         settings: dict[str, Any] = {},
+        deterministic_rules: list[str] | None = None,
     ):
         self.settings = create_settings(settings)
         self.linker = DBLinker(
@@ -78,6 +79,7 @@ class Linker:
         self.lower_limit_prob = lower_limit_probability
         self.predictions = None
         self._model_estimated = False
+        self.deterministic_rules = deterministic_rules
 
         self.save_model("data/model.json")
 
@@ -85,13 +87,16 @@ class Linker:
         self,
     ) -> Self:
         """Make model estimates. Needed before making predictions."""
-        deterministic_rules = self.settings.get(
-            "deterministic_rules",
-            BaseLinkingSettings.deterministic_rules,
-        )
+        if self.deterministic_rules is None:
+            self.deterministic_rules = DEFAULT_LINKING_CONFIG[
+                "DEFAULT_DETERMINISTIC_RULES"
+            ]
+
         blocking_rules = self.settings.get(
             "blocking_rules_to_generate_predictions",
-            BaseLinkingSettings.blocking_rules_to_generate_predictions,
+            DEFAULT_LINKING_CONFIG["DEFAULT_SETTINGS"][
+                "blocking_rules_to_generate_predictions"
+            ],
         )
         for x in blocking_rules:
             print(
@@ -104,7 +109,7 @@ class Linker:
         )
         print(f"Cumulative Comparisons:::[blue]{comps}")
         self.linker.estimate_probability_two_random_records_match(
-            deterministic_rules,
+            self.deterministic_rules,
             recall=0.9,
         )
 
