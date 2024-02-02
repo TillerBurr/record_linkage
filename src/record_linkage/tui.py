@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, TypeVar
@@ -150,9 +151,10 @@ class CommonInput(Container):
     def compose(self) -> ComposeResult:
         with Vertical():
             yield ValueInput(
-                label="ID Column",
-                input_id="id-col",
-                tooltip="The ID fields in both files must have the same name.",
+                label="Settings",
+                input_id="settings",
+                tooltip="The path of the settings.json file or a str "
+                + "representing the ID of the datasets.",
             )
             yield ValueInput(
                 label="Lower Prob. Limit",
@@ -239,21 +241,34 @@ class MainScreen(Screen):
             results_agg_col = self.query_or("#results-agg-col")
 
             lower_limit = float(self.query_or("#lower-limit", 0.01))
-            id_col = self.query_or("#id-col", "unique_id")
+            settings = self.query_or("#settings")
+            if settings and Path(settings).exists():
+                with Path(settings).open() as f:
+                    user_defined_settings = json.load(f)
+                    splink_settings = user_defined_settings["settings"]
+                    deterministic_rules = user_defined_settings["deterministic_rules"]
+                    id_column = splink_settings["unique_id_column_name"]
+            elif settings:
+                id_column = settings
+                deterministic_rules = None
+                splink_settings = {"unique_id_column_name": settings}
+            else:
+                id_column = None
+                deterministic_rules = None
+                splink_settings = {}
             output_dir = self.query_or("#output-dir", "data/")
-
             if starting_file_path is None or results_file_path is None:
                 raise ValueError("Please specify all of the fields.")
             else:
                 results_kwargs = remove_none_kwargs(
                     agg_col=results_agg_col,
-                    id_column=id_col,
+                    id_column=id_column,
                     name_col=results_name_col,
                     addr_col=results_address_col,
                 )
 
                 starting_kwargs = remove_none_kwargs(
-                    id_column=id_col,
+                    id_column=id_column,
                     addr_col=starting_address_col,
                     name_col=starting_name_col,
                 )
@@ -275,7 +290,7 @@ class MainScreen(Screen):
                 )
                 data = LinkedData(**linked_data_kwargs)
 
-                data.match(settings={"unique_id_column_name": id_col})
+                data.match(splink_settings, deterministic_rules)
                 # Convert output_dir to a directory
                 output_dir = output_dir.rstrip("/") + "/"
                 out_path = Path(output_dir)

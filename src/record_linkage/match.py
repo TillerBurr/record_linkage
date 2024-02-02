@@ -82,7 +82,11 @@ class LinkedData:
         self.results_normalized = norm_results
         return self
 
-    def link(self, settings: dict[str, Any] = {}) -> Self:
+    def link(
+        self,
+        settings: dict[str, Any] = {},
+        determinisitic_rules: list[str] | None = None,
+    ) -> Self:
         if not self._is_normalized:
             raise NotNormalizedError
         self.linker = Linker(
@@ -90,6 +94,7 @@ class LinkedData:
             results_df=self.results_normalized,
             lower_limit_probability=self.lower_limit_prob,
             settings=settings,
+            deterministic_rules=determinisitic_rules,
         )
         print("Estimating Model")
         self.linker.estimate_model()
@@ -139,10 +144,13 @@ class LinkedData:
 
     def match(
         self,
-        settings: dict[str, Any] = {},
+        splink_settings: dict[str, Any] = {},
+        determinisitic_rules: list[str] | None = None,
     ) -> Self:
         self.normalize()
-        self.link(settings)
+        self.link(
+            splink_settings,
+        )
 
         if not self._is_normalized:
             raise NotNormalizedError

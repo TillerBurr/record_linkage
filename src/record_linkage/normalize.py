@@ -1,7 +1,7 @@
 import re
 from copy import copy
 from pathlib import Path
-from typing import Self
+from typing import Any, Self
 from uuid import uuid4
 
 import polars as pl
@@ -60,6 +60,11 @@ class NormalizeConfig(BaseModel):
     agg_col: str | None = None
     addl_cols_to_keep: str | list[str] | None = None
     id_column: str | None = None
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.id_column is None:
+            self.id_column = ID_COLUMN
+        print(self)
 
 
 class Normalize:
