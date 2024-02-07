@@ -48,14 +48,12 @@ class LinkedData:
             infer_schema_length=10000,
             dtypes=dtype_mapping,
         )
-        self.results_amount_col = (
-            results_config.agg_col if results_config.agg_col else "Amount"
-        )
         self.original_starting_list = pl.read_csv(
             starting_list_path,
             infer_schema_length=10000,
             dtypes=dtype_mapping,
         )
+        self.results_agg_col = self.results_config.agg_col
         self.save_dir = save_dir
         self.lower_limit_prob = lower_limit_prob
         self._is_normalized = False
@@ -65,14 +63,14 @@ class LinkedData:
         self.results = Normalize(self.original_results_list, self.results_config)
         norm_results = self.results.normalize()
         results_orig = self.results.drop_dupes().df
-        if self.results_config.agg_col is not None:
+        if self.results_agg_col is not None:
             self.aggregated_results_orig = (
                 results_orig.select(
                     pl.col(self.id_column or ID_COLUMN),
-                    pl.col(self.results_amount_col),
+                    pl.col(self.results_agg_col),
                 )
                 .groupby(self.id_column)
-                .agg(pl.col(self.results_amount_col).sum())
+                .agg(pl.col(self.results_agg_col).sum())
             )
         self.starting_list = Normalize(
             self.original_starting_list,
@@ -84,7 +82,11 @@ class LinkedData:
         self.results_normalized = norm_results
         return self
 
-    def link(self, settings: dict[str, Any] = {}) -> Self:
+    def link(
+        self,
+        settings: dict[str, Any] = {},
+        determinisitic_rules: list[str] | None = None,
+    ) -> Self:
         if not self._is_normalized:
             raise NotNormalizedError
         self.linker = Linker(
@@ -92,12 +94,14 @@ class LinkedData:
             results_df=self.results_normalized,
             lower_limit_probability=self.lower_limit_prob,
             settings=settings,
+            deterministic_rules=determinisitic_rules,
         )
         print("Estimating Model")
         self.linker.estimate_model()
 
         print("Predicting Model")
         self.linker.predict()
+        assert self.linker.predictions is not None
         self.predictions = pl.from_pandas(
             self.linker.predictions.as_pandas_dataframe(),
         )
@@ -140,29 +144,33 @@ class LinkedData:
 
     def match(
         self,
-        settings: dict[str, Any] = {},
+        splink_settings: dict[str, Any] = {},
+        determinisitic_rules: list[str] | None = None,
     ) -> Self:
         self.normalize()
-        self.link(settings)
+        self.link(
+            splink_settings,
+        )
 
         if not self._is_normalized:
             raise NotNormalizedError
         if not self._is_linked:
             raise NotLinkedError
 
-        results = self.results.df.select(
-            self.id_column,
-            self.results_amount_col,
-        )
-        results_tmp = self.aggregated_results_orig.rename(
-            {self.results_amount_col: "temp_amt"},
-        )
+        if self.results_config.agg_col is not None:
+            results = self.results.df.select(
+                self.id_column,
+                self.results_agg_col,
+            )
+        else:
+            results = self.results.df.select(self.id_column)
 
         orig_starting_df_lower_id = self.starting_list.original_df.with_columns(
             pl.col(self.id_column).str.to_lowercase(),
         )
         key_match = orig_starting_df_lower_id.join(results, on=self.id_column)
         matched_ids = key_match.get_column(self.id_column)
+
         self.predictions = self.predictions.filter(
             pl.col(f"{self.id_column}_starting").is_in(matched_ids).is_not()
             & pl.col(f"{self.id_column}_results").is_in(matched_ids).is_not(),
@@ -201,34 +209,40 @@ class LinkedData:
             ],
         ).select(matched.columns)
         matched = key_match.vstack(matched)
-        matched = matched.join(
-            results_tmp,
-            on=self.id_column,
-            how="left",
-        )
 
-        # Check that all keys are matched properly
-        when_clause = pl.when(
-            pl.col(self.results_amount_col).is_null()
-            & pl.col("temp_amt").is_not_null(),
-        )
-        matched = matched.with_columns(
-            then_replace(
-                when_clause,
-                pl.col("temp_amt"),
-                self.results_amount_col,
-            ),
-            then_replace(
-                when_clause,
-                pl.col(self.id_column),
-                f"{self.id_column}_results",
-            ),
-            then_replace(when_clause, pl.lit(1.0), "match_probability"),
-            then_replace(when_clause, pl.lit(100.0), "match_weight"),
-        ).drop("temp_amt")
+        if self.results_agg_col is not None:
+            results_tmp = self.aggregated_results_orig.rename(
+                {self.results_agg_col: "temp_amt"},
+            )
+
+            matched = matched.join(
+                results_tmp,
+                on=self.id_column,
+                how="left",
+            )
+
+            # Check that all keys are matched properly
+            when_clause = pl.when(
+                pl.col(self.results_agg_col).is_null()
+                & pl.col("temp_amt").is_not_null(),
+            )
+            matched = matched.with_columns(
+                then_replace(
+                    when_clause,
+                    pl.col("temp_amt"),
+                    self.results_agg_col,
+                ),
+                then_replace(
+                    when_clause,
+                    pl.col(self.id_column),
+                    f"{self.id_column}_results",
+                ),
+                then_replace(when_clause, pl.lit(1.0), "match_probability"),
+                then_replace(when_clause, pl.lit(100.0), "match_weight"),
+            ).drop("temp_amt")
 
         self.matched = matched.sort(
-            by=[f"{self.id_column}_results", self.results_amount_col],
+            by=[f"{self.id_column}_results", self.results_agg_col or self.id_column],
             descending=[False, True],
         ).unique(subset=self.id_column)
         return self
@@ -240,6 +254,17 @@ def uniquify(
     secondary_sort_col: str = "match_weight",
     keep: UniqueKeepStrategy = "first",
 ) -> pl.DataFrame:
+    """Make a DataFrame unique for a given column.
+
+    Args:
+        df: DataFrame
+        column: Column to make unique within `df`
+        secondary_sort_col: Column used to sort by after `column`
+        keep: Keep strategy for unique.
+
+    Returns: Unique (in `column`) DataFrame
+
+    """
     unique_df = df.sort(
         by=[column, secondary_sort_col],
         descending=[False, True],
